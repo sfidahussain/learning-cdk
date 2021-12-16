@@ -1,100 +1,123 @@
 import * as cdk from '@aws-cdk/core';
-import * as s3 from '@aws-cdk/aws-s3';
 import * as ec2 from '@aws-cdk/aws-ec2';
-import * as iam from '@aws-cdk/aws-iam';
-import * as lambda from '@aws-cdk/aws-lambda';
 import * as ecs from "@aws-cdk/aws-ecs";
 import * as ecs_patterns from "@aws-cdk/aws-ecs-patterns";
-
+import * as ecr from '@aws-cdk/aws-ecr';
+import * as elbv2 from '@aws-cdk/aws-elasticloadbalancingv2';
+import * as path from "path";
 
 export class HelloCdkStack extends cdk.Stack {
   constructor(scope: cdk.App, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
+      const vpc = new ec2.Vpc(this, "MyVpc", {
+          maxAzs: 3 // Default is all AZs in region
+      });
 
-    new s3.Bucket(this, 'MyFirstBucket', {
-      versioned: true,
-      removalPolicy: cdk.RemovalPolicy.DESTROY,
-      autoDeleteObjects: true
+      const cluster = new ecs.Cluster(this, "MyCluster", {
+          vpc: vpc
+      });
+
+      // ECR repository
+      const repository_be = ecr.Repository.fromRepositoryName(this, 'hello-be', 'hello-be');
+
+    const repository_fe = ecr.Repository.fromRepositoryName(this, 'hello-fe', 'hello-fe');
+
+    // Create Task Definition for BE
+    const beTaskDefinition = new ecs.FargateTaskDefinition(this, 'beTaskDefinition');
+    const beContainer = beTaskDefinition.addContainer('web', {
+      // @ts-ignore
+      image: ecs.ContainerImage.fromEcrRepository(repository_be),
+      memoryLimitMiB: 256,
     });
 
-    new lambda.Function(this, 'MyLambda', {
-      code: lambda.Code.fromAsset('lambda'),
-      handler: 'hello.handler',
-      runtime: lambda.Runtime.PYTHON_3_6,
+    beContainer.addPortMappings({
+      containerPort: 8080,
     });
 
-    const defaultVpc = ec2.Vpc.fromLookup(this, 'VPC', { isDefault: true })
-
-    const cluster = new ecs.Cluster(this, "MyCluster", {
-      vpc: defaultVpc
+// Create Service for BE
+    const beService = new ecs.FargateService(this, "beService", {
+      cluster,
+      taskDefinition: beTaskDefinition,
     });
 
-    // Create a load-balanced Fargate service and make it public
-    new ecs_patterns.ApplicationLoadBalancedFargateService(this, "MyFargateService", {
-      cluster: cluster, // Required
-      cpu: 512, // Default is 256
-      desiredCount: 6, // Default is 1
-      taskImageOptions: { image: ecs.ContainerImage.fromRegistry("amazon/amazon-ecs-sample") },
-      memoryLimitMiB: 2048, // Default is 512
-      publicLoadBalancer: true // Default is false
+    // Create Task Definition for FE
+    const feTaskDefinition = new ecs.FargateTaskDefinition(this, 'feTaskDefinition');
+    const feContainer = feTaskDefinition.addContainer('web', {
+      // @ts-ignore
+      image: ecs.ContainerImage.fromEcrRepository(repository_fe),
+      memoryLimitMiB: 256,
     });
 
-    // Lets create a role for the instance
-    // You can attach permissions to a role and determine what your
-    // instance can or can not do
-      const role = new iam.Role(
-        this,
-        'simple-instance-1-role', // this is a unique id that will represent this resource in a Cloudformation template
-        { assumedBy: new iam.ServicePrincipal('ec2.amazonaws.com') }
-      )
+    feContainer.addPortMappings({
+      containerPort: 8080,
+    });
 
-    // lets create a security group for our instance
-    // A security group acts as a virtual firewall for your instance to control inbound and outbound traffic.
-    const securityGroup = new ec2.SecurityGroup(
-      this,
-      'simple-instance-1-sg',
-      {
-        vpc: defaultVpc,
-        allowAllOutbound: true, // will let your instance send outboud traffic
-        securityGroupName: 'simple-instance-1-sg',
+// Create Service for FE
+    const feService = new ecs.FargateService(this, "feService", {
+      cluster,
+      taskDefinition: feTaskDefinition,
+    });
+
+// Create ALB
+    const lb = new elbv2.ApplicationLoadBalancer(this, 'LB', {
+      vpc,
+      internetFacing: true
+    });
+    const listener = lb.addListener('PublicListener', { port: 8080, open: true });
+
+    const beTargetGroup = new elbv2.ApplicationTargetGroup(this, 'TargetGroupBE', {
+      port: 80,
+      vpc,
+      protocol: elbv2.ApplicationProtocol.HTTP,
+      targetType: elbv2.TargetType.IP,
+      healthCheck: {
+        path: '/actuator/health',
+        port: '8080',
+        protocol: elbv2.Protocol.HTTP
       }
-    )
+    });
 
-    // lets use the security group to allow inbound traffic on specific ports
-    securityGroup.addIngressRule(
-      ec2.Peer.anyIpv4(),
-      ec2.Port.tcp(22),
-      'Allows SSH access from Internet'
-    )
+    const feTargetGroup = new elbv2.ApplicationTargetGroup(this, 'TargetGroupFE', {
+      port: 80,
+      vpc,
+      protocol: elbv2.ApplicationProtocol.HTTP,
+      targetType: elbv2.TargetType.IP,
+      healthCheck: {
+        path: '/home/actuator/health',
+        port: '8080',
+        protocol: elbv2.Protocol.HTTP
+      }
+    });
 
-    securityGroup.addIngressRule(
-      ec2.Peer.anyIpv4(),
-      ec2.Port.tcp(80),
-      'Allows HTTP access from Internet'
-    )
 
-    securityGroup.addIngressRule(
-      ec2.Peer.anyIpv4(),
-      ec2.Port.tcp(443),
-      'Allows HTTPS access from Internet'
-    )
+    new elbv2.ApplicationListenerRule(this, 'MyApplicationListenerBeRule', {
+      listener: listener,
+      priority: 123,
+      pathPatterns: ['/api', '/api/*'],
+      targetGroups: [beTargetGroup],
+    });
 
-    // Finally lets provision our ec2 instance
-    const instance = new ec2.Instance(this, 'simple-instance-1', {
-      vpc: defaultVpc,
-      role: role,
-      securityGroup: securityGroup,
-      instanceName: 'simple-instance-1',
-      instanceType: ec2.InstanceType.of( // t2.micro has free tier usage in aws
-        ec2.InstanceClass.T2,
-        ec2.InstanceSize.MICRO
-      ),
-      machineImage: ec2.MachineImage.latestAmazonLinux({
-        generation: ec2.AmazonLinuxGeneration.AMAZON_LINUX_2,
-      }),
+    new elbv2.ApplicationListenerRule(this, 'MyApplicationListenerFeRule', {
+      listener: listener,
+      priority: 1,
+      pathPatterns: ['/home'],
+      targetGroups: [feTargetGroup],
+    });
 
-      keyName: 'test', // we will create this in the console before we deploy
-    })
+    listener.addTargetGroups("alb-listener-target-group", {
+      targetGroups: [feTargetGroup],
+    });
+
+// add to a target group so make containers discoverable by the application load balancer
+    feService.attachToApplicationTargetGroup(feTargetGroup);
+    beService.attachToApplicationTargetGroup(beTargetGroup);
+
+    new cdk.CfnOutput(this, 'LoadBalancerDNS', { value: lb.loadBalancerDnsName, });
+
+    // This is for integrating an API Gateway to a public load balancer with a dns name
+    // https://aws.amazon.com/premiumsupport/knowledge-center/api-gateway-application-load-balancers/
+    // If we are trying to integrate an API gateway with a private ALB , you'll need a network load balancer in between
+    // Route53 to API Gateway
 
   }
 }
