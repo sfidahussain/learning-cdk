@@ -21,10 +21,6 @@ export class HelloCdkStack extends cdk.Stack {
     // Create ALB
     const lb = new elbv2.ApplicationLoadBalancer(this, 'LB', {
       vpc,
-      // internetFacing: true,
-      // vpcSubnets: vpc.selectSubnets({
-      //   subnetType: ec2.SubnetType.PRIVATE_ISOLATED
-      // })
     });
 
     const listener = lb.addListener('PublicListener', { port: 80 });
