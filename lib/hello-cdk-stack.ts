@@ -45,18 +45,49 @@ export class HelloCdkStack extends cdk.Stack {
       targetGroups: [feTargetGroup],
     });
 
+    const beTargetGroup = new elbv2.ApplicationTargetGroup(this, 'TargetGroupBE', {
+      port: 80,
+      vpc,
+      protocol: elbv2.ApplicationProtocol.HTTP,
+      targetType: elbv2.TargetType.IP,
+      healthCheck: {
+        path: '/api/',
+        port: '80',
+        protocol: elbv2.Protocol.HTTP
+      }
+    });
+
+    new elbv2.ApplicationListenerRule(this, 'MyApplicationListenerBeRule', {
+      listener: listener,
+      priority: 123,
+      pathPatterns: ['/api/', '/api/*'],
+      targetGroups: [beTargetGroup],
+    });
+
     // ECR repository
+    const repository_fe = ecr.Repository.fromRepositoryName(this, 'hello-fe', 'hello-fe');
     const repository_be = ecr.Repository.fromRepositoryName(this, 'hello-be', 'hello-be');
 
     // Create Task Definition for FE
     const feTaskDefinition = new ecs.FargateTaskDefinition(this, 'feTaskDefinition');
-    const feContainer = feTaskDefinition.addContainer('web', {
+    const feContainer = feTaskDefinition.addContainer('ui', {
+      // @ts-ignore
+      image: ecs.ContainerImage.fromEcrRepository(repository_fe),
+      memoryLimitMiB: 256,
+    });
+
+    feContainer.addPortMappings({
+      containerPort: 80,
+    });
+    // Create Task Definition for BE
+    const beTaskDefinition = new ecs.FargateTaskDefinition(this, 'beTaskDefinition');
+    const beContainer = beTaskDefinition.addContainer('web', {
       // @ts-ignore
       image: ecs.ContainerImage.fromEcrRepository(repository_be),
       memoryLimitMiB: 256,
     });
 
-    feContainer.addPortMappings({
+    beContainer.addPortMappings({
       containerPort: 80,
     });
 
@@ -68,6 +99,17 @@ export class HelloCdkStack extends cdk.Stack {
 
 // add to a target group so make containers discoverable by the application load balancer
     feService.attachToApplicationTargetGroup(feTargetGroup);
+    // Create Service for FE
+    const beService = new ecs.FargateService(this, "beService", {
+      cluster,
+      taskDefinition: beTaskDefinition,
+    });
+
+    // add to a target group so make containers discoverable by the application load balancer
+    beService.attachToApplicationTargetGroup(beTargetGroup);
+
+// add to a target group so make containers discoverable by the application load balancer
+//     beService.attachToApplicationTargetGroup(beTargetGroup);
 
     new cdk.CfnOutput(this, 'LoadBalancerDNS', { value: lb.loadBalancerDnsName, });
     const api = new apigateway.HttpApi(this, 'httpApi', {
@@ -78,7 +120,6 @@ export class HelloCdkStack extends cdk.Stack {
     const vpcLink = new apigateway.VpcLink(this, 'VpcLink', { vpc });
 
     // @ts-ignore
-
     const integration = new apigatewayintegration.HttpAlbIntegration('Integration', listener, {
       vpcLink,
       method: HttpMethod.ANY,
